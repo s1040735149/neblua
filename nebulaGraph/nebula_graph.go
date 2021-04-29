@@ -57,9 +57,12 @@ func NewGraphInstance(conf *NebulaConf) (*NebulaObj, error) {
 	}, nil
 }
 
+//获取一个session
 func (m *NebulaObj) getSession() (*nebula.Session, error) {
 	return m.pool.GetSession(m.conf.UserName, m.conf.Password)
 }
+
+//检查返回结果是否成功
 func (m *NebulaObj) checkResultSet(res *nebula.ResultSet) error {
 	if !res.IsSucceed() {
 		return fmt.Errorf("ErrorCode: %v, ErrorMsg: %s", res.GetErrorCode(), res.GetErrorMsg())
@@ -67,7 +70,51 @@ func (m *NebulaObj) checkResultSet(res *nebula.ResultSet) error {
 	return nil
 }
 
-func (m *NebulaObj) CreateSpace(spaceName string, exists bool, pnum, rnum int, charset, collate string) error {
+//直接运行
+func (m *NebulaObj) Execute(dl string) (*nebula.ResultSet, error) {
+	return m.overExecute("", func(session *nebula.Session) (*nebula.ResultSet, error) {
+		return session.Execute(dl)
+	})
+}
+
+//包装运行
+func (m *NebulaObj) overExecute(spaceName string, f func(session *nebula.Session) (*nebula.ResultSet, error)) (*nebula.ResultSet, error) {
+	session, err := m.getSession()
+	if err != nil {
+		return nil, fmt.Errorf("get session err:%s", err.Error())
+	}
+	defer session.Release()
+
+	if spaceName != "" {
+		err := m.useSpace(spaceName, session)
+		if err != nil {
+			return nil, err
+		}
+	}
+	resultSet, err := f(session)
+	if err != nil {
+		return nil, err
+	}
+	if err = m.checkResultSet(resultSet); err != nil {
+		return nil, err
+	}
+	return resultSet, nil
+}
+
+//use图空间
+func (m *NebulaObj) useSpace(spaceName string, session *nebula.Session) error {
+	resultSet, err := session.Execute(fmt.Sprintf("USE %s;", spaceName))
+	if err != nil {
+		return err
+	}
+	if err = m.checkResultSet(resultSet); err != nil {
+		return err
+	}
+	return nil
+}
+
+//创建图空间
+func (m *NebulaObj) CreateSpace(spaceName string, ifNotExists bool, pnum, rnum int, charset, collate string) error {
 
 	if charset == "" {
 		charset = "utf8"
@@ -82,22 +129,58 @@ func (m *NebulaObj) CreateSpace(spaceName string, exists bool, pnum, rnum int, c
 		rnum = 3
 	}
 
-	session, err := m.getSession()
-	if err != nil {
-		return fmt.Errorf("get session err:%s", err.Error())
-	}
-	defer session.Release()
-
 	ddl := "CREATE SPACE "
-	if exists {
+	if ifNotExists {
 		ddl += "IF NOT EXISTS "
 	}
 	ddl += fmt.Sprintf("%s (partition_num = %d, replica_factor = %d, charset = %s, collate = %s);", spaceName, pnum, rnum, charset, collate)
-	resultSet, err := session.Execute(ddl)
+	_, err := m.overExecute("", func(session *nebula.Session) (*nebula.ResultSet, error) {
+		return session.Execute(ddl)
+	})
 	if err != nil {
 		return err
 	}
-	if err = m.checkResultSet(resultSet); err != nil {
+	return nil
+}
+
+//创建标签
+func (m *NebulaObj) CreateTag(spaceName, name string, ifNotExists bool, items map[string]string, options string) error {
+	return m.createTagOrEdge("TAG", spaceName, name, ifNotExists, items, options)
+}
+
+//创建边类型
+func (m *NebulaObj) CreateEdge(spaceName, name string, ifNotExists bool, items map[string]string, options string) error {
+	return m.createTagOrEdge("EDGE", spaceName, name, ifNotExists, items, options)
+}
+func (m *NebulaObj) createTagOrEdge(t, spaceName, name string, ifNotExists bool, items map[string]string, options string) error {
+	ddl := fmt.Sprintf("CREATE %s ", t)
+	if ifNotExists {
+		ddl += "IF NOT EXISTS "
+	}
+	ddl = fmt.Sprintf("%s %s(", ddl, name)
+	itemsLen := len(items)
+	if itemsLen != 0 {
+		s := ""
+		for k, v := range items {
+			s += fmt.Sprintf("%s %s,", k, v)
+		}
+
+		if string(s[len(s)-1]) == "," {
+			s = s[:len(s)-1]
+		}
+		ddl += fmt.Sprintf("%s)", s)
+	}
+
+	if options != "" {
+		ddl += options
+	}
+
+	ddl += ";"
+
+	_, err := m.overExecute(spaceName, func(session *nebula.Session) (*nebula.ResultSet, error) {
+		return session.Execute(ddl)
+	})
+	if err != nil {
 		return err
 	}
 	return nil
